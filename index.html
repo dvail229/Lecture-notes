@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1a1c">
+<title>Lecture Notes</title>
+<style>
+:root{--bg:#f4f7f7;--fg:#13201f;--mut:#5b6e6c;--card:#fff;--line:#d3dedd;--acc:#0b7a75;--rec:#c62f3b}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1a1c;--fg:#e6f0ef;--mut:#8fa5a3;--card:#16262a;--line:#27393d;--acc:#3cc4bb;--rec:#ff6470}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+main{max-width:720px;margin:0 auto;padding:14px}
+h1{font-size:1.3rem;margin:4px 0 12px}
+.bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);padding:10px 14px;border-radius:10px;min-height:44px}
+button:focus-visible,input:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+button.rec{background:var(--rec);border-color:var(--rec);color:#fff;font-weight:600;flex:1}
+button.pri{background:var(--acc);border-color:var(--acc);color:var(--bg);font-weight:600}
+button:disabled{opacity:.5}
+#status{color:var(--mut);font-size:.9rem;margin:0 0 12px;min-height:1.4em}
+.tabs{display:flex;gap:6px;margin-bottom:8px}
+.tabs button{flex:1;border-radius:10px 10px 0 0}
+.tabs button.on{border-bottom:3px solid var(--acc);font-weight:600}
+.pane{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;min-height:50vh;max-height:62vh;overflow:auto;overflow-wrap:anywhere}
+#tr{white-space:pre-wrap}.interim{color:var(--mut)}
+#notes h2,#notes h3,#notes h4{margin:1em 0 .3em}#notes ul{padding-left:1.2em;margin:.3em 0}
+dialog{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:12px;width:min(92vw,460px)}
+dialog::backdrop{background:#0008}
+label{display:block;margin:10px 0 4px;font-size:.9rem;color:var(--mut)}
+input{width:100%;font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)}
+.hide{display:none}
+@media print{body{background:#fff;color:#000}.bar,#status,.tabs,#tr{display:none!important}.pane{border:0;max-height:none;overflow:visible;display:block!important}main{padding:0}}
+</style>
+</head>
+<body>
+<main>
+<h1>Lecture Notes</h1>
+<div class="bar">
+  <button class="rec" id="recBtn">Start recording</button>
+  <button id="updBtn" disabled>Update notes now</button>
+  <button id="setBtn">Settings</button>
+</div>
+<p id="status">Add your two API keys in Settings, then tap Start recording.</p>
+<div class="tabs"><button id="tabN" class="on">Notes</button><button id="tabT">Transcript</button></div>
+<div class="pane" id="notes"><p style="color:var(--mut)">Notes will appear here while you record.</p></div>
+<div class="pane hide" id="tr"></div>
+<div class="bar" style="margin-top:12px">
+  <button id="pdfBtn">Save as PDF</button>
+  <button id="shareBtn">Share to Samsung Notes</button>
+  <button id="copyBtn">Copy notes</button>
+  <button id="clrBtn">New lecture</button>
+</div>
+</main>
+
+<dialog id="dlg">
+  <h2 style="margin-top:0">Settings</h2>
+  <label for="gk">Gemini API key (live notes)</label>
+  <input id="gk" type="password" autocomplete="off">
+  <label for="gm">Gemini model</label>
+  <input id="gm" placeholder="gemini-2.5-flash">
+  <label for="ck">Claude API key (final cleanup)</label>
+  <input id="ck" type="password" autocomplete="off">
+  <label for="cm">Claude model</label>
+  <input id="cm" placeholder="claude-haiku-4-5-20251001">
+  <label for="mins">Update notes every (minutes)</label>
+  <input id="mins" type="number" min="1" max="15" placeholder="3">
+  <p style="color:var(--mut);font-size:.85rem">Keys stay on this phone and are sent only to Google and Anthropic.</p>
+  <div class="bar"><button class="pri" id="saveSet">Save settings</button><button id="closeSet">Close</button></div>
+</dialog>
+
+<script>
+const $=id=>document.getElementById(id);
+const LS={get:(k,d='')=>{try{return localStorage.getItem(k)??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
+let transcript=LS.get('transcript'),notes=LS.get('notes'),sent=+LS.get('sent','0'),rec=null,running=false,timer=null,busy=false,wake=null;
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+const status=t=>$('status').textContent=t;
+
+const PROMPT=`You are a note-taker for an EMT/paramedic student. Medical content matters: keep drug names, doses, anatomy, protocols and numbers exact. Write organized Markdown notes: ## headings per topic, bullet points, **bold** key terms, and a short "Key points" list at the end. Do not invent facts that are not in the transcript. If a word looks like a speech-recognition mistake for a medical term, use the likely correct term. Return only the notes.`;
+
+function md(s){
+  const esc=t=>t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');
+  let out='',inList=false;
+  for(const l of s.split('\n')){
+    const h=l.match(/^(#{1,4})\s+(.*)/),b=l.match(/^\s*[-*]\s+(.*)/);
+    if(b){if(!inList){out+='<ul>';inList=true}out+='<li>'+esc(b[1])+'</li>';continue}
+    if(inList){out+='</ul>';inList=false}
+    if(h)out+=`<h${Math.min(h[1].length+1,4)}>${esc(h[2])}</h${Math.min(h[1].length+1,4)}>`;
+    else if(l.trim())out+='<p>'+esc(l)+'</p>';
+  }
+  return out+(inList?'</ul>':'');
+}
+function render(interim=''){
+  $('tr').innerHTML='';$('tr').append(document.createTextNode(transcript));
+  if(interim){const s=document.createElement('span');s.className='interim';s.textContent=interim;$('tr').append(s)}
+  $('notes').innerHTML=notes?md(notes):'<p style="color:var(--mut)">Notes will appear here while you record.</p>';
+  LS.set('transcript',transcript);LS.set('notes',notes);LS.set('sent',sent);
+}
+
+async function gemini(prompt){
+  const m=LS.get('gm')||'gemini-2.5-flash';
+  const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${encodeURIComponent(LS.get('gk'))}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:prompt}]}]})});
+  const j=await r.json();
+  if(!r.ok)throw new Error(j.error?.message||('Gemini error '+r.status));
+  return j.candidates?.[0]?.content?.parts?.map(p=>p.text).join('')||'';
+}
+async function claude(prompt){
+  const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':LS.get('ck'),'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:LS.get('cm')||'claude-haiku-4-5-20251001',max_tokens:8000,messages:[{role:'user',content:prompt}]})});
+  const j=await r.json();
+  if(!r.ok)throw new Error(j.error?.message||('Claude error '+r.status));
+  return j.content.map(c=>c.text||'').join('');
+}
+
+async function liveUpdate(){
+  const fresh=transcript.slice(sent).trim();
+  if(busy||fresh.length<200)return;
+  if(!LS.get('gk')){status('Add your Gemini key in Settings to get live notes.');return}
+  busy=true;const end=transcript.length;status('Updating notes…');
+  try{
+    notes=await gemini(`${PROMPT}\n\nCURRENT NOTES:\n${notes||'(none yet)'}\n\nNEW TRANSCRIPT SECTION:\n${fresh}\n\nUpdate the notes to include the new section. Keep existing content, merge related topics, and return the full updated notes.`);
+    sent=end;render();status(running?'Recording…':'Notes updated.');
+  }catch(e){status('Live notes paused: '+e.message+' (will retry)')}
+  busy=false;
+}
+async function finalPass(){
+  if(!LS.get('ck')){status('Stopped. Add your Claude key in Settings for the final cleanup.');return}
+  if(!transcript.trim())return;
+  busy=true;status('Final cleanup with Claude… this can take a minute.');
+  try{
+    notes=await claude(`${PROMPT}\n\nThis is the end of the lecture. Produce the final, well-organized study notes from the full transcript below. Use the draft notes only as a guide and fix any errors in them.\n\nDRAFT NOTES:\n${notes}\n\nFULL TRANSCRIPT:\n${transcript}`);
+    sent=transcript.length;render();status('Done. Notes are ready to export.');
+  }catch(e){status('Final cleanup failed: '+e.message+'. Your draft notes are kept.')}
+  busy=false;
+}
+
+function startRec(){
+  if(!SR){status('This browser has no speech recognition. Use Chrome on Android.');return}
+  rec=new SR();rec.continuous=true;rec.interimResults=true;rec.lang='en-US';
+  rec.onresult=e=>{
+    let interim='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const t=e.results[i][0].transcript;
+      if(e.results[i].isFinal)transcript+=(transcript&&!/\s$/.test(transcript)?' ':'')+t.trim()+' ';else interim+=t;
+    }
+    render(interim);
+  };
+  rec.onerror=e=>{if(e.error==='not-allowed'||e.error==='service-not-allowed'){running=false;status('Microphone blocked. Allow it in your browser settings.');setUI()}};
+  rec.onend=()=>{if(running)try{rec.start()}catch(e){setTimeout(()=>running&&startRec(),500)}};
+  rec.start();
+}
+async function toggle(){
+  if(!running){
+    running=true;setUI();status('Recording…');startRec();
+    try{wake=await navigator.wakeLock?.request('screen')}catch(e){}
+    timer=setInterval(liveUpdate,(+LS.get('mins')||3)*60000);
+  }else{
+    running=false;clearInterval(timer);try{rec.stop()}catch(e){}try{wake?.release()}catch(e){}
+    setUI();await liveUpdate();await finalPass();setUI();
+  }
+}
+function setUI(){
+  $('recBtn').textContent=running?'Stop and finish notes':'Start recording';
+  $('updBtn').disabled=!running;
+}
+document.addEventListener('visibilitychange',async()=>{if(running&&document.visibilityState==='visible'){try{wake=await navigator.wakeLock?.request('screen')}catch(e){}}});
+
+const tab=n=>{$('notes').classList.toggle('hide',!n);$('tr').classList.toggle('hide',n);$('tabN').classList.toggle('on',n);$('tabT').classList.toggle('on',!n)};
+$('tabN').onclick=()=>tab(true);$('tabT').onclick=()=>tab(false);
+$('recBtn').onclick=toggle;
+$('updBtn').onclick=liveUpdate;
+$('setBtn').onclick=()=>{$('gk').value=LS.get('gk');$('gm').value=LS.get('gm');$('ck').value=LS.get('ck');$('cm').value=LS.get('cm');$('mins').value=LS.get('mins');$('dlg').showModal()};
+$('closeSet').onclick=()=>$('dlg').close();
+$('saveSet').onclick=()=>{['gk','gm','ck','cm','mins'].forEach(k=>LS.set(k,$(k).value.trim()));$('dlg').close();status('Settings saved.')};
+$('pdfBtn').onclick=()=>{tab(true);window.print()};
+$('shareBtn').onclick=async()=>{
+  if(!notes)return status('No notes to share yet.');
+  if(navigator.share){try{await navigator.share({title:'Lecture notes',text:notes})}catch(e){}}
+  else status('Sharing is not available here. Use Copy notes instead.');
+};
+$('copyBtn').onclick=async()=>{try{await navigator.clipboard.writeText(notes);status('Notes copied.')}catch(e){status('Copy failed.')}};
+$('clrBtn').onclick=()=>{
+  if(running)return status('Stop recording first.');
+  if(confirm('Clear the current transcript and notes? Export them first if you need them.')){transcript='';notes='';sent=0;render();status('Ready for a new lecture.')}
+};
+render();
+</script>
+</body>
+</html>
