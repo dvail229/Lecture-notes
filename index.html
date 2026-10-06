@@ -40,6 +40,7 @@ mark{background:#ffd54a;color:#000;border-radius:3px;padding:0 2px;-webkit-print
 <h1>Lecture Notes</h1>
 <div class="bar">
   <button class="rec" id="recBtn">Start recording</button>
+  <button id="pauseBtn" disabled>Pause</button>
   <button id="updBtn" disabled>Update notes now</button>
   <button id="setBtn">Settings</button>
 </div>
@@ -76,7 +77,7 @@ mark{background:#ffd54a;color:#000;border-radius:3px;padding:0 2px;-webkit-print
 <script>
 const $=id=>document.getElementById(id);
 const LS={get:(k,d='')=>{try{return localStorage.getItem(k)??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
-let transcript=LS.get('transcript'),notes=LS.get('notes'),sent=+LS.get('sent','0'),rec=null,lastChunk='',curInterim='',marks=JSON.parse(LS.get('marks','[]')),mine=JSON.parse(LS.get('mine','[]')),markDone=+LS.get('markDone','0'),running=false,timer=null,busy=false,wake=null;
+let transcript=LS.get('transcript'),notes=LS.get('notes'),sent=+LS.get('sent','0'),rec=null,lastChunk='',curInterim='',marks=JSON.parse(LS.get('marks','[]')),mine=JSON.parse(LS.get('mine','[]')),markDone=+LS.get('markDone','0'),paused=false,running=false,timer=null,busy=false,wake=null;
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
 const status=t=>$('status').textContent=t;
 
@@ -131,7 +132,7 @@ async function liveUpdate(){
     let out='',via='';
     try{if(!LS.get('gk'))throw new Error('No Gemini key');out=await gemini(lp)}
     catch(g){if(!LS.get('ck'))throw g;status('Gemini unavailable, using Claude…');out=await claude(lp);via=' (via Claude)'}
-    notes=out;sent=end;markDone=mEnd;render();status((running?'Recording…':'Notes updated.')+via);
+    notes=out;sent=end;markDone=mEnd;render();status((running?(paused?'Paused.':'Recording…'):'Notes updated.')+via);
   }catch(e){status('Live notes paused: '+e.message+' (will retry)')}
   busy=false;
 }
@@ -163,8 +164,8 @@ function startRec(){
     }
     render(interim);
   };
-  rec.onerror=e=>{if(e.error==='not-allowed'||e.error==='service-not-allowed'){running=false;status('Microphone blocked. Allow it in your browser settings.');setUI()}};
-  rec.onend=()=>{if(running)setTimeout(()=>{if(running)startRec()},300)};
+  rec.onerror=e=>{if(e.error==='not-allowed'||e.error==='service-not-allowed'){running=false;paused=false;status('Microphone blocked. Allow it in your browser settings.');setUI()}};
+  rec.onend=()=>{if(running&&!paused)setTimeout(()=>{if(running&&!paused)startRec()},300)};
   rec.start();
 }
 async function toggle(){
@@ -173,19 +174,33 @@ async function toggle(){
     try{wake=await navigator.wakeLock?.request('screen')}catch(e){}
     timer=setInterval(liveUpdate,(+LS.get('mins')||3)*60000);
   }else{
-    running=false;clearInterval(timer);try{rec.stop()}catch(e){}try{wake?.release()}catch(e){}
+    running=false;paused=false;clearInterval(timer);try{rec.stop()}catch(e){}try{wake?.release()}catch(e){}
     setUI();await liveUpdate();await finalPass();setUI();
   }
 }
 function setUI(){
   $('recBtn').textContent=running?'Stop and finish notes':'Start recording';
-  $('updBtn').disabled=!running;$('markBtn').disabled=!running;
+  $('updBtn').disabled=!running;$('markBtn').disabled=!running||paused;
+  $('pauseBtn').disabled=!running;$('pauseBtn').textContent=paused?'Resume':'Pause';
 }
-document.addEventListener('visibilitychange',async()=>{if(running&&document.visibilityState==='visible'){try{wake=await navigator.wakeLock?.request('screen')}catch(e){}}});
+document.addEventListener('visibilitychange',async()=>{if(running&&!paused&&document.visibilityState==='visible'){try{wake=await navigator.wakeLock?.request('screen')}catch(e){}}});
 
 const tab=n=>{$('notes').classList.toggle('hide',!n);$('tr').classList.toggle('hide',n);$('tabN').classList.toggle('on',n);$('tabT').classList.toggle('on',!n)};
 $('tabN').onclick=()=>tab(true);$('tabT').onclick=()=>tab(false);
 $('recBtn').onclick=toggle;
+$('pauseBtn').onclick=async()=>{
+  if(!running)return;
+  if(!paused){
+    paused=true;clearInterval(timer);
+    try{rec.stop()}catch(e){}
+    try{wake?.release()}catch(e){}
+    setUI();liveUpdate();status('Paused. Tap Resume to keep recording.');
+  }else{
+    paused=false;setUI();status('Recording…');startRec();
+    try{wake=await navigator.wakeLock?.request('screen')}catch(e){}
+    timer=setInterval(liveUpdate,(+LS.get('mins')||3)*60000);
+  }
+};
 const now=()=>new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
 $('markBtn').onclick=()=>{
   const tx=(transcript+curInterim).slice(-400).trim();
