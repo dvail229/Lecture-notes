@@ -124,11 +124,14 @@ async function claude(prompt){
 async function liveUpdate(){
   sent=Math.min(sent,transcript.length);const fresh=transcript.slice(sent).trim();
   if(busy||(fresh.length<200&&markDone>=marks.length))return;
-  if(!LS.get('gk')){status('Add your Gemini key in Settings to get live notes.');return}
+  if(!LS.get('gk')&&!LS.get('ck')){status('Add your API keys in Settings to get live notes.');return}
   busy=true;const end=transcript.length,mEnd=marks.length;status('Updating notes…');
   try{
-    notes=await gemini(`${PROMPT}\n\nCURRENT NOTES:\n${notes||'(none yet)'}\n\nNEW TRANSCRIPT SECTION:\n${fresh}${ctx(false)}\n\nUpdate the notes to include the new section. Keep existing content, merge related topics, and return the full updated notes.`);
-    sent=end;markDone=mEnd;render();status(running?'Recording…':'Notes updated.');
+    const lp=`${PROMPT}\n\nCURRENT NOTES:\n${notes||'(none yet)'}\n\nNEW TRANSCRIPT SECTION:\n${fresh}${ctx(false)}\n\nUpdate the notes to include the new section. Keep existing content, merge related topics, and return the full updated notes.`;
+    let out='',via='';
+    try{if(!LS.get('gk'))throw new Error('No Gemini key');out=await gemini(lp)}
+    catch(g){if(!LS.get('ck'))throw g;status('Gemini unavailable, using Claude…');out=await claude(lp);via=' (via Claude)'}
+    notes=out;sent=end;markDone=mEnd;render();status((running?'Recording…':'Notes updated.')+via);
   }catch(e){status('Live notes paused: '+e.message+' (will retry)')}
   busy=false;
 }
