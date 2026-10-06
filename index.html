@@ -30,6 +30,8 @@ dialog::backdrop{background:#0008}
 label{display:block;margin:10px 0 4px;font-size:.9rem;color:var(--mut)}
 input{width:100%;font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--fg)}
 .hide{display:none}
+mark{background:#ffd54a;color:#000;border-radius:3px;padding:0 2px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+#mine{flex:1;width:auto}
 @media print{body{background:#fff;color:#000}.bar,#status,.tabs,#tr{display:none!important}.pane{border:0;max-height:none;overflow:visible;display:block!important}main{padding:0}}
 </style>
 </head>
@@ -42,6 +44,8 @@ input{width:100%;font:inherit;padding:10px;border-radius:8px;border:1px solid va
   <button id="setBtn">Settings</button>
 </div>
 <p id="status">Add your two API keys in Settings, then tap Start recording.</p>
+<div class="bar"><button class="pri" id="markBtn" disabled style="flex:1">Mark important</button></div>
+<div class="bar"><input id="mine" placeholder="Type a note to add…" enterkeyhint="send"><button id="addBtn">Add</button></div>
 <div class="tabs"><button id="tabN" class="on">Notes</button><button id="tabT">Transcript</button></div>
 <div class="pane" id="notes"><p style="color:var(--mut)">Notes will appear here while you record.</p></div>
 <div class="pane hide" id="tr"></div>
@@ -72,14 +76,14 @@ input{width:100%;font:inherit;padding:10px;border-radius:8px;border:1px solid va
 <script>
 const $=id=>document.getElementById(id);
 const LS={get:(k,d='')=>{try{return localStorage.getItem(k)??d}catch(e){return d}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}}};
-let transcript=LS.get('transcript'),notes=LS.get('notes'),sent=+LS.get('sent','0'),rec=null,lastChunk='',running=false,timer=null,busy=false,wake=null;
+let transcript=LS.get('transcript'),notes=LS.get('notes'),sent=+LS.get('sent','0'),rec=null,lastChunk='',curInterim='',marks=JSON.parse(LS.get('marks','[]')),mine=JSON.parse(LS.get('mine','[]')),markDone=+LS.get('markDone','0'),running=false,timer=null,busy=false,wake=null;
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
 const status=t=>$('status').textContent=t;
 
-const PROMPT=`You are a note-taker for an EMT/paramedic student. Medical content matters: keep drug names, doses, anatomy, protocols and numbers exact. Write organized Markdown notes: ## headings per topic, bullet points, **bold** key terms, and a short "Key points" list at the end. Do not invent facts that are not in the transcript. If a word looks like a speech-recognition mistake for a medical term, use the likely correct term. Return only the notes.`;
+const PROMPT=`You are a note-taker for an EMT/paramedic student. Medical content matters: keep drug names, doses, anatomy, protocols and numbers exact. Write organized Markdown notes: ## headings per topic, bullet points, **bold** key terms, and a short "Key points" list at the end. Do not invent facts that are not in the transcript. If a word looks like a speech-recognition mistake for a medical term, use the likely correct term. When the student flagged important moments, wrap the matching note text in ==double equals== so it shows highlighted, and never remove existing ==highlights==. Return only the notes.`;
 
 function md(s){
-  const esc=t=>t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');
+  const esc=t=>t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/\*\*(.+?)\*\*/g,'<b>$1</b>').replace(/==(.+?)==/g,'<mark>$1</mark>');
   let out='',inList=false;
   for(const l of s.split('\n')){
     const h=l.match(/^(#{1,4})\s+(.*)/),b=l.match(/^\s*[-*]\s+(.*)/);
@@ -90,11 +94,17 @@ function md(s){
   }
   return out+(inList?'</ul>':'');
 }
-function render(interim=''){
+function fullNotes(){return notes+(mine.length?(notes?'\n\n':'')+'## My notes\n'+mine.map(m=>'- '+m.t+' — '+m.text).join('\n'):'')}
+function ctx(all){
+  const ms=marks.slice(all?0:markDone);
+  return (mine.length?`\n\nSTUDENT'S OWN TYPED NOTES (shown separately; use as context, do not copy them):\n${mine.map(m=>m.text).join('\n')}`:'')
+   +(ms.length?`\n\nMOMENTS THE STUDENT FLAGGED AS IMPORTANT (transcript excerpts; highlight the matching notes):\n${ms.map((m,i)=>(i+1)+'. ...'+m.text).join('\n')}`:'');
+}
+function render(interim=''){curInterim=interim;
   $('tr').innerHTML='';$('tr').append(document.createTextNode(transcript));
   if(interim){const s=document.createElement('span');s.className='interim';s.textContent=interim;$('tr').append(s)}
-  $('notes').innerHTML=notes?md(notes):'<p style="color:var(--mut)">Notes will appear here while you record.</p>';
-  LS.set('transcript',transcript);LS.set('notes',notes);LS.set('sent',sent);
+  $('notes').innerHTML=fullNotes()?md(fullNotes()):'<p style="color:var(--mut)">Notes will appear here while you record.</p>';
+  LS.set('transcript',transcript);LS.set('notes',notes);LS.set('sent',sent);LS.set('marks',JSON.stringify(marks));LS.set('mine',JSON.stringify(mine));LS.set('markDone',markDone);
 }
 
 async function gemini(prompt){
@@ -113,12 +123,12 @@ async function claude(prompt){
 
 async function liveUpdate(){
   sent=Math.min(sent,transcript.length);const fresh=transcript.slice(sent).trim();
-  if(busy||fresh.length<200)return;
+  if(busy||(fresh.length<200&&markDone>=marks.length))return;
   if(!LS.get('gk')){status('Add your Gemini key in Settings to get live notes.');return}
-  busy=true;const end=transcript.length;status('Updating notes…');
+  busy=true;const end=transcript.length,mEnd=marks.length;status('Updating notes…');
   try{
-    notes=await gemini(`${PROMPT}\n\nCURRENT NOTES:\n${notes||'(none yet)'}\n\nNEW TRANSCRIPT SECTION:\n${fresh}\n\nUpdate the notes to include the new section. Keep existing content, merge related topics, and return the full updated notes.`);
-    sent=end;render();status(running?'Recording…':'Notes updated.');
+    notes=await gemini(`${PROMPT}\n\nCURRENT NOTES:\n${notes||'(none yet)'}\n\nNEW TRANSCRIPT SECTION:\n${fresh}${ctx(false)}\n\nUpdate the notes to include the new section. Keep existing content, merge related topics, and return the full updated notes.`);
+    sent=end;markDone=mEnd;render();status(running?'Recording…':'Notes updated.');
   }catch(e){status('Live notes paused: '+e.message+' (will retry)')}
   busy=false;
 }
@@ -127,8 +137,8 @@ async function finalPass(){
   if(!transcript.trim())return;
   busy=true;status('Final cleanup with Claude… this can take a minute.');
   try{
-    notes=await claude(`${PROMPT}\n\nThis is the end of the lecture. Produce the final, well-organized study notes from the full transcript below. Use the draft notes only as a guide and fix any errors in them.\n\nDRAFT NOTES:\n${notes}\n\nFULL TRANSCRIPT:\n${transcript}`);
-    sent=transcript.length;render();status('Done. Notes are ready to export.');
+    notes=await claude(`${PROMPT}\n\nThis is the end of the lecture. Produce the final, well-organized study notes from the full transcript below. Use the draft notes only as a guide and fix any errors in them.\n\nDRAFT NOTES:\n${notes}\n\nFULL TRANSCRIPT:\n${transcript}${ctx(true)}`);
+    sent=transcript.length;markDone=marks.length;render();status('Done. Notes are ready to export.');
   }catch(e){status('Final cleanup failed: '+e.message+'. Your draft notes are kept.')}
   busy=false;
 }
@@ -166,27 +176,41 @@ async function toggle(){
 }
 function setUI(){
   $('recBtn').textContent=running?'Stop and finish notes':'Start recording';
-  $('updBtn').disabled=!running;
+  $('updBtn').disabled=!running;$('markBtn').disabled=!running;
 }
 document.addEventListener('visibilitychange',async()=>{if(running&&document.visibilityState==='visible'){try{wake=await navigator.wakeLock?.request('screen')}catch(e){}}});
 
 const tab=n=>{$('notes').classList.toggle('hide',!n);$('tr').classList.toggle('hide',n);$('tabN').classList.toggle('on',n);$('tabT').classList.toggle('on',!n)};
 $('tabN').onclick=()=>tab(true);$('tabT').onclick=()=>tab(false);
 $('recBtn').onclick=toggle;
+const now=()=>new Date().toLocaleTimeString([],{hour:'numeric',minute:'2-digit'});
+$('markBtn').onclick=()=>{
+  const tx=(transcript+curInterim).slice(-400).trim();
+  if(!tx)return status('Nothing heard yet to mark.');
+  marks.push({t:now(),text:tx});render(curInterim);
+  $('markBtn').textContent='Marked ('+marks.length+')';
+  setTimeout(()=>{$('markBtn').textContent='Mark important ('+marks.length+')'},1500);
+};
+const addMine=()=>{
+  const v=$('mine').value.trim();if(!v)return;
+  mine.push({t:now(),text:v});$('mine').value='';render(curInterim);status('Added to your notes.');
+};
+$('addBtn').onclick=addMine;
+$('mine').onkeydown=e=>{if(e.key==='Enter')addMine()};
 $('updBtn').onclick=liveUpdate;
 $('setBtn').onclick=()=>{$('gk').value=LS.get('gk');$('gm').value=LS.get('gm');$('ck').value=LS.get('ck');$('cm').value=LS.get('cm');$('mins').value=LS.get('mins');$('dlg').showModal()};
 $('closeSet').onclick=()=>$('dlg').close();
 $('saveSet').onclick=()=>{['gk','gm','ck','cm','mins'].forEach(k=>LS.set(k,$(k).value.trim()));$('dlg').close();status('Settings saved.')};
 $('pdfBtn').onclick=()=>{tab(true);window.print()};
 $('shareBtn').onclick=async()=>{
-  if(!notes)return status('No notes to share yet.');
-  if(navigator.share){try{await navigator.share({title:'Lecture notes',text:notes})}catch(e){}}
+  if(!fullNotes())return status('No notes to share yet.');
+  if(navigator.share){try{await navigator.share({title:'Lecture notes',text:fullNotes().replace(/==/g,'')})}catch(e){}}
   else status('Sharing is not available here. Use Copy notes instead.');
 };
-$('copyBtn').onclick=async()=>{try{await navigator.clipboard.writeText(notes);status('Notes copied.')}catch(e){status('Copy failed.')}};
+$('copyBtn').onclick=async()=>{try{await navigator.clipboard.writeText(fullNotes().replace(/==/g,''));status('Notes copied.')}catch(e){status('Copy failed.')}};
 $('clrBtn').onclick=()=>{
   if(running)return status('Stop recording first.');
-  if(confirm('Clear the current transcript and notes? Export them first if you need them.')){transcript='';notes='';sent=0;render();status('Ready for a new lecture.')}
+  if(confirm('Clear the current transcript and notes? Export them first if you need them.')){transcript='';notes='';sent=0;marks=[];mine=[];markDone=0;lastChunk='';$('markBtn').textContent='Mark important';render();status('Ready for a new lecture.')}
 };
 render();
 </script>
